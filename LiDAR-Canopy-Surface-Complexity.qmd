@@ -1,0 +1,460 @@
+---
+title: "The relationship between canopy height, topography, and residual spatial structure in LiDAR-derived canopy surface complexity in eastern Mount Rainier National Park"
+author: "Lavran Pagano"
+abstract: |
+  The relationship between canopy surface complexity, canopy height, elevation, and topographic heat load was analyzed across a 7.4 × 16.7 km LiDAR footprint located on the eastern edge of Mount Rainier National Park. Airborne laser scanning (ALS) point clouds were used to derive canopy and topographic attributes across the footprint. Bayesian regression models were then fit to evaluate marginal and conditional relationships between rumple and the measured covariates. Residual spatial dependence was assessed using Moran’s I and empirical semivariograms, and an intrinsic conditional autoregressive (ICAR) spatial random effect was subsequently used to model spatial structure explicitly. Across both the nonspatial and spatial models, canopy height was the dominant measured correlate of canopy surface complexity. Although rumple showed a strong negative marginal relationship with elevation, this relationship substantially weakened once canopy height was included, and its credible interval spanned zero once spatial structure was modeled. Topographic heat load showed only a weak conditional association. These findings suggest that the apparent elevational gradient in canopy surface complexity is explained by the concurrent decline in canopy stature, consistent with previous studies linking canopy height to structural complexity. They also illustrate that the elevation coefficient, unlike the canopy-height coefficient, depends materially on how residual spatial structure is modeled.
+
+format:
+  html:
+    toc: false
+    embed-resources: true
+    number-sections: false
+    html-math-method: mathjax
+    theme: cosmo
+    fig-width: 9
+    fig-height: 6
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+#| label: setup
+from pathlib import Path
+import numpy as np, pandas as pd, rasterio
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+plt.rcParams.update({"figure.facecolor":"white","savefig.facecolor":"white","axes.facecolor":"white"})
+project_dir = Path(".")
+terrain_path        = project_dir / "Rainier_lidar_2019/DTM/Rainier_lidar_2019_terrain_metrics.tiff"
+canopy_metrics_path = project_dir / "Rainier_lidar_2019/Canopy_metrics/Rainier_lidar_2019_canopy_metrics.tiff"
+rumple_pitfree_path = project_dir / "Rainier_lidar_2019/Rumple/pit free/rumple_pitfree.tiff"
+chm_pitfree_path    = project_dir / "Rainier_lidar_2019/Khosravipour_et_al_CHM/Rainier_lidar_2019_Khosravipour_CHM.tiff"
+boundary_path       = project_dir / "Rainier_boundary/mora_boundary.shp"
+naip_path           = project_dir / "Mount_Rainier_NAIP_2019_RGB.tif"
+metrics_path        = project_dir / "metrics_spatial.pkl"
+spatial_field_path  = project_dir / "spatial_field_icar.csv"
+elev_cmap  = LinearSegmentedColormap.from_list("elev",  ["#585b63","#3854a0","#4a6ac1","#b69bec","#ffffff"])
+green_cmap = LinearSegmentedColormap.from_list("green", ["#6f4e2c","#9cb37a","#5c8a3c","#356b3b","#123d22"])
+heat_cmap  = LinearSegmentedColormap.from_list("heat",  ["#ffffff","#f1f0a0","#f2eb1b","#f7b26c","#fb7d00","#ff4141","#d90b0b"])
+def _read(path, band):
+    with rasterio.open(path) as s:
+        a = s.read(band, masked=True).astype("float32"); b = s.bounds
+    return np.ma.masked_invalid(a), [b.left, b.right, b.bottom, b.top]
+```
+
+# Introduction
+
+In U.S. Pacific Northwest conifer forests, LiDAR-derived measures of canopy complexity have been shown to correspond closely with field-based assessments of stand structure (Kane et al. 2010a). A common measure of canopy-surface complexity is the rumple index. The rumple index describes the unevenness of the upper canopy surface as the ratio of canopy surface area to projected ground area, with higher values indicating a rougher canopy (Kane et al. 2010a).
+
+Previous research on canopy complexity has documented negative relationships between elevation and canopy complexity in both temperate and tropical forests. Across an elevational gradient in Great Smoky Mountains National Park, Walter et al. (2021) found that canopy height and internal canopy structural complexity declined with elevation. Moreover, in Puerto Rico, Ankori-Karlinsky et al. (2024) likewise found that canopy surface rugosity decreased with elevation in a model that included canopy height; their model predicted approximately 15% lower rugosity in forests above 1,000 meters than in forests below that elevation. Although these studies measured different dimensions of canopy complexity, both report a decline in complexity with increasing elevation. This pattern is not universal, however. In western Washington conifer forests, Kane et al. (2010b) found no consistent relationship between elevation and LiDAR-derived structural classes; the one exception was that primary mountain hemlock plots, in their highest-elevation zone, were structurally complex. Those classes, however, were constructed from rumple, canopy height, and canopy density to characterize stand development; the study did not test whether rumple itself varied with elevation independently of canopy height. Together, these studies measured different dimensions of canopy complexity and found different elevational patterns, motivating examination of whether the elevation–rumple relationship persists after accounting for canopy height and topographic exposure in eastern Mount Rainier.
+
+Decreasing canopy height may partly explain the decline in complexity with increasing elevation, as Atkins et al. (2022) found positive relationships between canopy height and structural complexity, with the form of these relationships differing among forest types and complexity metrics; in evergreen needleleaf forests, complexity increased less steeply with height than in other forest types. Taller canopies provide more vertical space for structural variation to develop. Consequently, where canopy height decreases with elevation, an accompanying decline in complexity may partly reflect changes in canopy stature. Accounting for canopy height therefore lets us evaluate the elevation–complexity relationship among canopies of comparable height.
+
+Another potential environmental predictor is topographic heat load. Calculated from slope, aspect, and latitude, the index represents potential heating associated with terrain exposure, from the coolest northeast-facing to the warmest southwest-facing slopes (McCune and Keon 2002). In conifer forests of Yosemite National Park, local topographic predictors, including solar radiation, explained relatively little of the variation in LiDAR-derived canopy cover and height when considered alone, despite the importance generally attributed to solar radiation and heat load (Kane et al. 2015). That study examined canopy cover and height, whereas the present study examines canopy-surface complexity. We therefore examine whether heat load is associated with canopy-surface rumple in high-elevation Cascade conifer forests. Including it alongside canopy height allows the elevation–rumple association to be assessed after accounting for both canopy stature and topographic exposure.
+
+These relationships must also be evaluated in the context of spatial dependence. Nearby forest cells may share ecological attributes not represented by the included canopy and topographic metrics, leaving spatial patterns in canopy complexity that measured predictors do not fully represent. Conditional autoregressive models represent such dependence through relationships among neighboring observations (Ver Hoef et al. 2018). Including a spatial component can change both the estimated associations with environmental predictors and their uncertainty, particularly when predictors themselves are spatially structured (Hodges and Reich 2010). Comparing spatial and nonspatial models therefore helps assess how the estimated elevation–complexity relationship changes when residual spatial dependence is modeled.
+
+This study examines how much of the negative relationship between elevation and canopy surface complexity in eastern Mount Rainier National Park is statistically accounted for by decreasing canopy height, topographic heat load, and spatial structure. Airborne LiDAR was used to quantify rumple, elevation, 95th-percentile canopy height, and topographic heat load. A series of Bayesian regression models were then fit to assess how the association between elevation and rumple changed when canopy height and heat load were included, followed by an intrinsic conditional autoregressive model representing residual dependence among neighboring cells.
+
+# Methods
+
+**Study area and LiDAR data**
+
+This study took place on a 7.4 × 16.7 km airborne LiDAR footprint on the eastern flank of Mount Rainier National Park, Washington, USA (@fig-studyarea). Forested cells in the analysis span 1,336–2,081 m elevation (mean 1,678 m) on steep terrain (mean slope 22.8°). Airborne LiDAR data were obtained via the Washington State Department of Natural Resources LiDAR Portal, which redistributes the USGS WA Eastern Cascades 2019 B19 acquisition. The dataset was collected between October 2019 and August 2020 under the USGS 3D Elevation Program LiDAR Base Specification 1.3 and was delivered as classified LAS 1.4 point clouds ([U.S. Geological Survey project report](https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/metadata/WA_EasternCascades_2019_B19/USGS_WA_EasternCascades_2019_B19_Project_Report.pdf)). The acquisition was delivered at USGS Quality Level 1 (nominal pulse spacing ≤ 0.35 m). All point-cloud processing was conducted in NAD83(2011) / UTM Zone 10N. All raster products were anchored to a single survey-wide 30 m analysis lattice derived from the overall LiDAR bounds, with the 1 m canopy grid nested within it, so that terrain, canopy, and rumple layers share a common origin and no resampling was required at any stage. Processing and modeling code is organized as numbered scripts in the project repository. A statistical outlier filter using eight nearest neighbors and a 2.5-standard-deviation multiplier was applied to remove isolated returns. Returns assigned to low-noise class 7 or high-noise class 18 were also removed. Height above ground was computed from a Delaunay triangulation of ground returns and written into the point Z coordinate, yielding a normalized-height point cloud. These cleaning and normalization steps were applied to each LiDAR tile separately. Ground elevation was derived separately from class-2 returns as a 30-meter inverse-distance-weighted surface, generated per tile on the survey lattice and mosaicked. Slope and aspect were computed from the mosaicked terrain surface rather than within tiles, avoiding derivative discontinuities at tile seams. NoData gaps were filled by nearest neighbor before differentiation and masked back to the observed extent afterward, so gradients are defined everywhere without reporting values over unobserved terrain.
+
+```{python}
+#| echo: false
+#| label: fig-studyarea
+#| fig-cap: "Study area and 2019 NAIP imagery for the airborne-LiDAR footprint near Mount Rainier. The inset places the footprint within Mount Rainier National Park."
+
+if naip_path.exists() and boundary_path.exists() and terrain_path.exists():
+    import geopandas as gpd
+    import matplotlib.patheffects as pe
+    from shapely.geometry import box
+    from rasterio.windows import from_bounds as _wfb
+    from rasterio.warp import transform_bounds as _tbb
+    from rasterio.enums import Resampling as _RSMP
+
+    try:
+        import contextily as cx
+        HAVE_CX = True
+    except ImportError:
+        HAVE_CX = False
+
+    with rasterio.open(terrain_path) as s:
+        tb, tcrs = s.bounds, s.crs
+
+    with rasterio.open(naip_path) as ns:
+        l, b, r, t = _tbb(tcrs, ns.crs, tb.left, tb.bottom, tb.right, tb.top)
+        win = _wfb(l, b, r, t, ns.transform)
+        scale = max(1, int(max(win.width, win.height) / 1600))
+        oh = max(1, int(win.height / scale))
+        ow = max(1, int(win.width / scale))
+        rgb = ns.read([1, 2, 3], window=win, out_shape=(3, oh, ow),
+                      resampling=_RSMP.average, boundless=True, fill_value=0)
+
+    rgb = np.moveaxis(rgb, 0, -1)
+    alpha = (rgb.sum(axis=2) > 0).astype("uint8") * 255
+    rgba = np.dstack([rgb, alpha])
+
+    fig, ax = plt.subplots(figsize=(10, 12))
+    ax.imshow(rgba, extent=[l, r, b, t])
+    ax.set_xlim(l, r); ax.set_ylim(b, t); ax.set_axis_off()
+
+    span = r - l
+    nice = min([200, 500, 1000, 2000], key=lambda v: abs(v - 0.25 * span))
+    xa, ya = l + 0.06 * span, b + 0.06 * (t - b)
+    ax.plot([xa, xa + nice], [ya, ya], color="white", linewidth=5, solid_capstyle="butt")
+    ax.plot([xa, xa + nice], [ya, ya], color="black", linewidth=2, solid_capstyle="butt")
+    lbl = f"{nice/1000:g} km" if nice >= 1000 else f"{nice:g} m"
+    txt = ax.text(xa + nice / 2, ya + 0.02 * (t - b), lbl, ha="center", va="bottom", color="white")
+    txt.set_path_effects([pe.withStroke(linewidth=2, foreground="black")])
+
+    park = gpd.read_file(boundary_path).to_crs(3857)
+    aoi = gpd.GeoDataFrame(geometry=[box(tb.left, tb.bottom, tb.right, tb.top)], crs=tcrs).to_crs(3857)
+    cen = aoi.geometry.centroid.iloc[0]
+    axloc = ax.inset_axes([0.56, 0.52, 0.44, 0.44])
+    park.boundary.plot(ax=axloc, color="black", linewidth=1.3, zorder=3)
+    axloc.plot(cen.x, cen.y, marker="s", color="red", markersize=9, markeredgecolor="black", zorder=6)
+    pminx, pminy, pmaxx, pmaxy = park.total_bounds
+    mx, my = (pmaxx-pminx)*0.05, (pmaxy-pminy)*0.05
+    axloc.set_xlim(pminx-mx, pmaxx+mx); axloc.set_ylim(pminy-my, pmaxy+my)
+    if HAVE_CX:
+        try:
+            cx.add_basemap(axloc, source=cx.providers.Esri.NatGeoWorldMap,
+                           crs=3857, attribution=False, zorder=0)
+        except Exception:
+            pass
+    axloc.set_xticks([]); axloc.set_yticks([])
+    plt.show()
+else:
+    print("Study-area inputs not found; set the paths in the setup chunk to render this figure.")
+```
+
+**Canopy Cover**
+
+Canopy cover was computed from first returns of the cleaned, height-normalized point cloud in survey-aligned 30 m cells, processed in 1,200 m chunks that pooled all intersecting LAZ tiles, so that no step of the metric calculation followed tile boundaries. The proportion of first returns above 2 meters was then calculated for each 30 m cell. This first-return estimator of canopy cover follows [Korhonen et al. (2011)](https://doi.org/10.1016/j.rse.2010.12.011); the 2 m height threshold follows [Kane et al. (2015)](https://doi.org/10.1016/j.foreco.2014.10.038).
+
+**Canopy Height (p95)**
+
+The 95th percentile of first-return height (p95) was used to represent canopy stature because upper-canopy percentiles provide a robust estimate of dominant canopy height while reducing sensitivity to anomalously high returns that can affect maximum-height metrics. For each 30 m cell, p95 was calculated as the 95th percentile of normalized first-return heights, including returns from the ground; in open cells p95 therefore also reflects canopy cover (Spearman $\rho = 0.77$ between p95 and cover across the analysis cells). Moreover, p95 has repeatedly been used with rumple to characterize conifer stand structure ([Kane et al. 2010a](https://doi.org/10.1139/X10-024), [2010b](https://doi.org/10.1139/X10-064)).
+
+**Canopy Height Model**
+
+A raster of canopy height (CHM) was created by employing a layered-TIN approach inspired by [Khosravipour et al. (2014)](https://doi.org/10.14358/PERS.80.9.863). This was done in an effort to correct for a common issue with CHMs derived from airborne LiDAR, where artificial depressions, or “pits,” are created when laser pulses penetrate gaps in the upper canopy and return from lower branches, understory vegetation, or the ground. Before stratification, the highest first return within each survey-aligned 1-meter cell was retained. First returns were then stratified at height thresholds of 0, 2, 5, 10, 15, and 25 meters to construct successive upper-canopy surfaces. The 25-meter threshold was selected as the highest additional stratum that retained sufficient return density across the study area; substantially higher thresholds produced very sparse point subsets. Each stratum was triangulated. Triangles exceeding a maximum edge length of 5 meters for the base layer and 1.5 meters for elevated layers were discarded to prevent the TIN surfaces from bridging large unsupported gaps in the canopy. For each 1-meter cell, the maximum supported height estimated across all strata was retained, reducing artificial canopy depressions that can result from a single triangulated surface. To reduce computational intensity and minimize chunk-edge effects, CHMs were processed in 600-meter chunks with a 20-meter buffer on the survey lattice and then mosaicked together.
+
+**Rumple**
+
+Rumple was computed from the 1-meter CHM at 30 m resolution. Before surface-area calculation, the CHM was smoothed using a mask-aware 3 × 3 moving window inspired by the approach used in [Kane et al. (2010b)](https://doi.org/10.1139/X10-064). Only valid CHM cells contributed to the neighborhood mean, preventing cells without a valid canopy-height estimate from being treated as zero. A smoothed value could still be calculated temporarily for a missing cell from surrounding valid neighbors; these temporary values were used only to calculate local surface gradients and were excluded from the final rumple aggregation.
+
+For the smoothed canopy surface, the local surface-area multiplier for each supported 1 m cell was calculated as
+
+$$
+A_f = \sqrt{1 + \left(\frac{\partial z}{\partial x}\right)^2 + \left(\frac{\partial z}{\partial y}\right)^2},
+$$
+
+where $z$ is canopy height. Rumple was then calculated for each 30-meter cell as the mean surface-area multiplier across all supported 1-meter cells within that cell,
+
+$$
+R = \frac{1}{n}\sum_{j=1}^{n} A_{f,j},
+$$
+
+providing a raster-based analog of the ratio of three-dimensional surface area to projected planar area ([Jenness 2004](https://doi.org/10.2193/0091-7648\(2004\)032%5B0829\:CLSAFD%5D2.0.CO;2); [Parker et al. 2004](https://doi.org/10.1007/s10021-004-0136-5); [Kane et al. 2010b](https://doi.org/10.1139/X10-064)). A 30-meter cell was retained only when surface-area multipliers could be calculated for at least 90% of its constituent 1-meter cells.
+
+**Topographic Heat Load**
+
+Topographic heat load was used to represent variation in potential solar heating associated with terrain orientation and slope. Heat load was calculated at a latitude of 46.85° N using Equation 3 from [McCune and Keon (2002)](https://doi.org/10.1111/j.1654-1103.2002.tb02087.x), which integrates slope, aspect, and latitude into a single index of potential annual heat loading. With slope $S$, latitude $L$, and aspect $\theta$ in radians, aspect was folded about the northeast–southwest axis,
+
+$$
+A = \left|\pi - \left|\theta - \frac{5\pi}{4}\right|\right|,
+$$
+
+and heat load was calculated as
+
+$$
+H = 0.339 + 0.808\cos(L)\cos(S) - 0.196\sin(L)\sin(S) - 0.482\cos(A)\sin(S).
+$$
+
+Slope and aspect were derived from the 30 m digital elevation model. Equation 3 is specified for latitudes of 30–60° N and slopes up to 60°; 30 of the 21,897 analysis cells (0.1%) had slopes above 60° (maximum 66°) and were retained. The resulting heat-load values represent potential topographic exposure rather than direct measurements of canopy temperature or moisture.
+
+**Non-spatial Bayesian Regressions**
+
+First, a structural forest mask was applied by removing cells with less than 10% canopy cover or p95 canopy height below 5 m, which retained 22,482 cells. The analysis was then restricted to the largest connected component of the 45 m neighborhood graph (21,897 cells; see Spatial Bayesian Model), so that the nonspatial and spatial models were fit to the same cells. Elevation, heat load, and p95 were standardized once, within these 21,897 cells, and the same standardized values were used in every model. Six Bayesian Gaussian regression models were then fit to evaluate how the relationships between rumple and each predictor changed when other covariates were included: rumple on heat load, elevation, and p95 individually; elevation + heat load; p95 + heat load; and p95 + elevation + heat load. Models were fit with Bambi ([Capretto et al. 2022](https://doi.org/10.18637/jss.v103.i15)); no custom priors were specified, and Bambi's default priors were used. Each model used four NUTS chains with 1,000 tuning and 1,000 retained draws per chain. Residual spatial dependence of the full nonspatial model was assessed on posterior-mean residuals with Moran’s I ([Moran 1950](https://doi.org/10.1093/biomet/37.1-2.17)), using a row-standardized binary 45 m distance band (rook and diagonal neighbors on the 30 m lattice) and 999 permutations, and with an empirical semivariogram (Matheron estimator, 20 lags to 1,500 m, spherical model with nugget, 3,000-point sample; [Matheron 1963](https://doi.org/10.2113/gsecongeo.58.8.1246)).
+
+**Spatial Bayesian Model**
+
+Because residuals from the full nonspatial model showed strong spatial autocorrelation, the final model included a spatial random effect. Given that the observations consisted of contiguous 30 m raster cells rather than irregularly distributed point samples, and that the inferential target was the regression coefficients rather than interpolation to unsampled locations, spatial dependence was represented directly through relationships among neighboring cells using an adjacency-structured Gaussian Markov random field (GMRF) ([Ver Hoef et al. 2018](https://doi.org/10.1002/ecm.1283)).
+
+The spatial prior was an intrinsic conditional autoregressive (ICAR) distribution, used as implemented in `pm.ICAR` in PyMC ([Abril-Pla et al. 2023](https://doi.org/10.7717/peerj-cs.1516); [Morris et al. 2019](https://doi.org/10.1016/j.sste.2019.100301); Banerjee et al. 2015). Under an ICAR prior, each cell effect is, conditional on its neighbors, normally distributed about the mean of those neighbors with a variance inversely proportional to how many neighbors the cell has. Written jointly, this is equivalent to penalizing the squared difference between every pair of neighboring cells, so the prior favors fields that vary smoothly from cell to cell without specifying what causes the smoothness.
+
+An ICAR prior is improper along an additive constant within each connected component: adding the same value to every cell leaves all pairwise differences, and therefore the density, unchanged. A soft sum-to-zero constraint was therefore applied to identify the overall level, with standard deviation $0.001n$ following Morris et al. (2019). The field was drawn at unit scale and multiplied by a separately estimated standard deviation, the non-centered parameterization recommended in the PyMC documentation. Unlike the Besag–York–Mollié model, no separate unstructured cell-level random effect was included; with a Gaussian likelihood that role is played by the residual term $\sigma$, and a separate effect would not be identifiable.
+
+The neighborhood graph was defined by queen contiguity (cell centers within 45 m). Because an ICAR prior requires one sum-to-zero constraint per connected component, the analysis was restricted to the largest connected component of that graph: 21,897 of the 22,482 forested cells (97.4%), with 74,989 edges and a mean degree of 6.85. The 585 excluded cells lay in 94 small components, 52 of which were single isolated cells. Excluding them was preferred to joining components by linking each stray to its nearest cell outside the component, which would assert adjacency between cells separated by up to several hundred meters and allow the prior to smooth across those fabricated edges. The nonspatial models used these same cells and the same standardization, so coefficients are expressed per standard deviation of the cells actually modeled and are directly comparable across the full model sequence.
+
+The final model was
+
+$$
+\begin{aligned}
+y_i &\sim \operatorname{Normal}(\mu_i, \sigma), \\
+\mu_i &= \alpha + \beta_p p_i + \beta_e e_i + \beta_h h_i + \tau\phi_i,
+\end{aligned}
+$$
+
+where $p_i$, $e_i$, and $h_i$ are standardized p95, elevation, and heat load, respectively, $\phi_i$ is the centered spatial field, and $\tau$ is the spatial scale parameter. Priors were $\alpha \sim \mathrm{Normal}(2,1)$, $\beta_p,\beta_e,\beta_h \sim \mathrm{Normal}(0,1)$, $\tau \sim \mathrm{HalfNormal}(1)$, and $\sigma \sim \mathrm{HalfNormal}(0.5)$. The model was sampled with the nutpie NUTS implementation ([Seyboldt et al. 2026](https://doi.org/10.48550/arXiv.2603.18845)), using four chains, 2,000 tuning and 8,000 retained draws per chain, target acceptance 0.9, a fixed seed (1738), and nutpie's low-rank mass matrix adaptation (`adaptation="low_rank"`). A diagonal mass matrix, the default, rescales each parameter independently and cannot represent correlation between parameters; because the elevation coefficient is strongly correlated with the spatial field in the posterior, its effective sample size under the default was an order of magnitude below that of every other parameter. Convergence was assessed by $\hat{R}$ and effective sample size for all scalar parameters (intercept, coefficients, $\tau$ and $\sigma$), and residual Moran’s I and the semivariogram were recomputed from the posterior-mean fitted surface. The posterior-mean spatial field was formed by multiplying the scale and the field within each draw before averaging, rather than multiplying the two posterior means.
+
+Explained variance is reported as the residual standard deviation rather than as Bayesian $R^2$. Because the spatial model carries one latent effect per analysis cell, a conditional $R^2$ approaches one by construction and is not comparable with the nonspatial models; residual $\sigma$ is on the scale of the response and is comparable across the whole model sequence.
+
+# Results
+
+**Landscape patterns.** The final analysis included 21,897 forested 30 m cells. Of the 22,482 cells that passed the forest mask, 585 (2.6%) were excluded because they formed small patches not connected to the main forested area, which the spatial model requires (see Methods). Elevation ranged from 1,336 to 2,081 m, with a mean of 1,678 m. Mean rumple was 2.24 (SD = 0.80; range = 1.03–7.07), while mean 95th-percentile canopy height (p95) was 18.0 m (SD = 8.3 m; maximum = 58.8 m). Rumple and p95 were strongly positively correlated (Pearson $r = 0.93$), and both decreased with elevation ($r = -0.55$ for rumple and $r = -0.58$ for p95). In comparison, the marginal relationship between heat load and rumple was weak ($r = 0.16$). These spatial patterns are visible across the LiDAR footprint in @fig-metric-maps, where lower-elevation portions of the study area generally contained taller canopies and higher rumple values.
+
+```{python}
+#| echo: false
+#| label: fig-metric-maps
+#| fig-cap: "Elevation, 95th-percentile canopy height (p95), canopy surface complexity (rumple), and topographic heat load across the LiDAR footprint. White areas indicate no data."
+elev, ext = _read(terrain_path, 1); slope,_=_read(terrain_path,2); aspect,_=_read(terrain_path,3)
+p95,_=_read(canopy_metrics_path,1); rumple,_=_read(rumple_pitfree_path,1)
+S=np.radians(slope); asp=np.radians(aspect); L=np.radians(46.85)
+asp=np.where(slope==0,0.0,asp); A=np.abs(np.pi-np.abs(asp-5*np.pi/4))
+heat=0.339+0.808*np.cos(L)*np.cos(S)-0.196*np.sin(L)*np.sin(S)-0.482*np.cos(A)*np.sin(S)
+panels=[("Elevation (m)",elev,elev_cmap),("Canopy height, p95 (m)",p95,green_cmap),("Rumple",rumple,green_cmap),("Heat load",heat,heat_cmap)]
+fig,axes=plt.subplots(2,2,figsize=(10,11))
+for ax,(t,arr,cm) in zip(axes.ravel(),panels):
+    cm=cm.copy(); cm.set_bad("white")
+    im=ax.imshow(arr,extent=ext,cmap=cm); ax.set_title(t); ax.set_axis_off()
+    plt.colorbar(im,ax=ax,shrink=0.7)
+fig.tight_layout(); plt.show()
+```
+
+Representative 30 m canopy surfaces also illustrate the strong relationship between canopy height and rumple (@fig-3d). Cells with taller canopies generally showed greater variation in canopy-surface height than cells with shorter canopies. These examples are shown only to illustrate the canopy geometry represented by rumple and were not used independently in the statistical analysis.
+
+```{python}
+#| echo: false
+#| label: fig-3d
+#| fig-cap: "Representative 30 m pit-free canopy surfaces spanning short, intermediate, and tall canopy heights. The examples illustrate the increase in canopy-surface relief associated with increasing p95 and are not an independent statistical test."
+
+from rasterio.windows import from_bounds as _fb
+from scipy.ndimage import distance_transform_edt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers the 3d projection)
+
+def block_mean(a, f):
+    H = (a.shape[0] // f) * f
+    W = (a.shape[1] // f) * f
+    return a[:H, :W].reshape(H//f, f, W//f, f).mean(axis=(1, 3))
+
+def clean_patch(wx, wy, path, half=15.0, agg=2):
+    with rasterio.open(path) as s:
+        win = _fb(wx-half, wy-half, wx+half, wy+half, s.transform)
+        a = s.read(1, window=win, boundless=True, fill_value=s.nodata).astype("float32")
+        nod = s.nodata
+    valid = np.isfinite(a) & (a != nod)
+    gap = float(np.nanmean(np.where(valid, a, np.nan) < 2.0))  # fraction of near-ground cells
+    if (~valid).any() and valid.any():
+        idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+        a = a[tuple(idx)]
+    return block_mean(np.clip(a, 0, None), agg), gap
+
+if chm_pitfree_path.exists() and metrics_path.exists():
+    m = pd.read_pickle(metrics_path)
+    # Three fully forested (closed-canopy) cells spanning canopy height, short -> tall.
+    # Rumple tracks canopy height rather than elevation, and closed canopy of every height
+    # sits at a similar elevation here, so the panels are chosen by canopy height (p95):
+    # the nearest-median-rumple closed cell at each target height.
+    closed = m[m["cover"] >= 0.90]
+    labels = ["Short canopy", "Intermediate", "Tall canopy"]
+    picks = []
+    for target_h in [12.0, 22.0, 32.0]:
+        grp = closed[np.abs(closed["p95"] - target_h) <= 3.0].copy()
+        grp["score"] = np.abs(grp["rumple"] - grp["rumple"].median())  # typical roughness at this height
+        grp = grp.sort_values("score")
+        chosen = None
+        for _, row in grp.head(80).iterrows():
+            z, gap = clean_patch(row["x"], row["y"], chm_pitfree_path)
+            if gap <= 0.02:                        # essentially no gaps to ground: a closed crown
+                chosen = (row, z); break
+        if chosen is None:                         # fallback: nearest-height closed cell
+            row = grp.iloc[0]
+            z, _ = clean_patch(row["x"], row["y"], chm_pitfree_path)
+            chosen = (row, z)
+        picks.append(chosen)
+
+    _prev_fc = plt.rcParams["savefig.facecolor"]
+    plt.rcParams["savefig.facecolor"] = "black"
+    fig = plt.figure(figsize=(12, 4.8), facecolor="black")
+    for k, ((row, z), lab) in enumerate(zip(picks, labels), start=1):
+        ax = fig.add_subplot(1, 3, k, projection="3d")
+        ax.set_facecolor("black")
+        Y, X = np.mgrid[0:z.shape[0], 0:z.shape[1]]
+        lo, hi = float(z.min()), float(z.max())
+        # each panel on its own scale -> full black-to-white contrast within every surface
+        ax.plot_surface(X, Y, z, cmap="bone", vmin=lo, vmax=hi,
+                        rstride=1, cstride=1, linewidth=0, antialiased=True)
+        ax.set_zlim(lo, hi)
+        ax.set_box_aspect((1, 1, 0.55))
+        ax.view_init(elev=35, azim=-60)
+        ax.set_axis_off()
+        ax.set_title(f"{lab}\np95 {row['p95']:.0f} m · rumple {row['rumple']:.2f}",
+                     color="white", fontsize=10)
+    fig.text(0.5, 0.05, "⟶  Greater structural complexity  ⟶", ha="center",
+             color="white", fontsize=13)
+    fig.subplots_adjust(left=0, right=1, top=0.99, bottom=0.09, wspace=0.0)
+    plt.show()
+    plt.rcParams["savefig.facecolor"] = _prev_fc
+else:
+    print("Set chm_pitfree_path and metrics_path to render this figure.")
+```
+
+**Nonspatial Bayesian regressions.** All six nonspatial Bayesian models converged successfully. When modeled alone, elevation had a strong negative association with rumple ($\beta = -0.443$, 94% HDI [−0.452, −0.435]), while heat load had a comparatively weak positive association ($\beta = 0.130$, [0.119, 0.139]). Canopy height showed the strongest association with rumple: the p95-only model produced a coefficient of 0.742 [0.738, 0.745] and reduced residual $\sigma$ to 0.305, compared with 0.668 for the elevation-only model and 0.791 for the heat-load-only model (@tbl-nonspatial).
+
+Adding heat load to the elevation model had little effect on the elevation coefficient, which changed from −0.443 to −0.436. In contrast, when p95 was included with elevation and heat load, the elevation coefficient shrank toward zero, to −0.022 [−0.027, −0.017]. The heat-load coefficient likewise decreased to 0.036 [0.032, 0.040] in the full model, while the p95 coefficient remained large at 0.724 [0.720, 0.729]. Residual $\sigma$ showed the same pattern: it fell from 0.791 in the heat-load-only model to 0.303 once p95 was added, and adding elevation to that model reduced it only to 0.302.
+
+| Model | Canopy height, p95 | Elevation | Heat load | Residual $\sigma$ |
+|---|---:|---:|---:|---:|
+| Rumple ~ heat load | — | — | 0.130 [0.119, 0.139] | 0.791 |
+| Rumple ~ elevation | — | −0.443 [−0.452, −0.435] | — | 0.668 |
+| Rumple ~ p95 | 0.742 [0.738, 0.745] | — | — | 0.305 |
+| Rumple ~ elevation + heat load | — | −0.436 [−0.445, −0.428] | 0.098 [0.089, 0.106] | 0.661 |
+| Rumple ~ p95 + heat load | 0.737 [0.734, 0.741] | — | 0.036 [0.032, 0.040] | 0.303 |
+| Rumple ~ p95 + elevation + heat load | 0.724 [0.720, 0.729] | −0.022 [−0.027, −0.017] | 0.036 [0.032, 0.040] | 0.302 |
+
+: Posterior means with 94% highest-density intervals for the nonspatial Bayesian model sequence, fit to the same 21,897 cells as the spatial model. Predictors were standardized within those cells; coefficients are in rumple units per SD of the predictor. {#tbl-nonspatial}
+
+**Residual spatial dependence.** Despite the strong relationship between canopy height and rumple, residuals from the full nonspatial model remained spatially structured. Moran's I was 0.380 using the 45 m neighborhood definition, with a permutation $p$-value of 0.001. The empirical semivariogram also showed increasing semivariance with distance, with the strongest increase occurring over the first several hundred meters and additional structure extending toward the kilometer scale (fitted nugget 0.069, structured sill 0.028). The fitted spherical range reached the 1,500 m maximum lag, so the range itself is not identified by these data and only the nugget and sill are reported. Thus, the measured covariates accounted for much of the variation associated with elevation but did not account for the spatial organization of the remaining residual variation.
+
+**Spatial ICAR model.** The spatial model converged with no divergent transitions and $\hat{R} \leq 1.01$ for all reported parameters. Canopy height remained the strongest measured correlate of rumple, with a posterior coefficient of 0.663 [0.657, 0.669] (@tbl-spatial), about eight percent below its value in the full nonspatial model. The conditional elevation coefficient, by contrast, was 0.017 [−0.004, 0.042]: small, positive rather than negative, and with a credible interval spanning zero. The heat-load coefficient remained small and positive at 0.014 [0.006, 0.022]. The estimated spatial scale parameter was 0.327 [0.314, 0.339]. Residual $\sigma$ was 0.203, below the full nonspatial model but well above zero; because the ICAR prior penalizes differences between neighboring cells, the spatial field represents smooth spatial variation and absorbs only part of the cell-level variation, the rest of which is carried by $\sigma$.
+
+| Parameter | Posterior mean | SD | 94% HDI | $\hat{R}$ | ESS (bulk) |
+|---|---:|---:|---:|---:|---:|
+| Intercept | 2.242 | 0.001 | [2.239, 2.244] | 1.00 | 69,296 |
+| Canopy height, p95 | 0.663 | 0.003 | [0.657, 0.669] | 1.00 | 9,240 |
+| Elevation | 0.017 | 0.012 | [−0.004, 0.042] | 1.01 | 704 |
+| Heat load | 0.014 | 0.004 | [0.006, 0.022] | 1.00 | 3,418 |
+| Spatial scale, $\tau$ | 0.327 | 0.007 | [0.314, 0.339] | 1.00 | 1,835 |
+| Residual $\sigma$ | 0.203 | 0.002 | [0.199, 0.207] | 1.00 | 2,429 |
+
+: Posterior summaries for the spatial ICAR model (four chains × 8,000 retained draws). {#tbl-spatial}
+
+The posterior mean of the spatial field (@fig-latent) showed coherent multi-hundred-meter patches of positive and negative spatial effects not explained by canopy height, elevation, or heat load.
+
+```{python}
+#| echo: false
+#| label: fig-latent
+#| fig-cap: "Posterior mean of the spatial ICAR field (rumple units) over the forested analysis cells. Positive and negative values show spatially structured variation not explained by canopy height, elevation, or heat load."
+field = pd.read_csv(spatial_field_path)
+with rasterio.open(terrain_path) as s:
+    tr, shape, bnd = s.transform, s.shape, s.bounds
+r, c = rasterio.transform.rowcol(tr, field["x"].to_numpy(), field["y"].to_numpy())
+grid = np.full(shape, np.nan, dtype="float32")
+grid[np.asarray(r), np.asarray(c)] = field["spatial_effect"].to_numpy()
+lim = float(np.nanpercentile(np.abs(grid), 99))
+cmap = plt.get_cmap("RdBu_r").copy()
+cmap.set_bad("white")
+fig, ax = plt.subplots(figsize=(6.5, 11))
+im = ax.imshow(
+    np.ma.masked_invalid(grid),
+    extent=[bnd.left, bnd.right, bnd.bottom, bnd.top],
+    cmap=cmap,
+    vmin=-lim,
+    vmax=lim,
+)
+ax.set_axis_off()
+plt.colorbar(im, ax=ax, shrink=0.6, label="Spatial effect (rumple units)")
+fig.tight_layout()
+plt.show()
+```
+
+After inclusion of the spatial field, the positive residual autocorrelation observed in the nonspatial model was gone. Moran's I fell from 0.380 to −0.039. At $n = 21{,}897$ even a value this small is separable from the permutation null ($p = 0.001$), but it is an order of magnitude smaller in absolute size than the nonspatial residual and opposite in sign. Weak negative autocorrelation is what a per-cell random effect produces when it absorbs a little local noise along with the spatial signal, and it is not evidence of positive structure left unmodeled. The residual semivariogram was correspondingly flat: the fitted nugget fell from 0.069 to 0.028 and the structured sill from 0.028 to $1.6 \times 10^{-7}$, which is effectively zero. With no structured component remaining, the spherical range is not identified and is not reported.
+
+**Sensitivity of the coefficients to the spatial specification.** The canopy-height and elevation coefficients behaved very differently across the model sequence (@tbl-sensitivity). Canopy height moved by about eight percent between the full nonspatial model and the spatial model, from 0.724 to 0.663, having moved only two percent across the nonspatial sequence before that. Elevation, by contrast, moved by nearly twice its own magnitude and changed sign, from a small negative value that excluded zero to a small positive value that includes it. Elevation is the smoothest of the three covariates, varying gradually across the footprint on the same scale as the spatial field, so the two compete to explain the same low-frequency variation; canopy height varies at much shorter range and is correspondingly less sensitive to how the spatial term is specified. This is the behavior described by Hodges and Reich ([2010](https://doi.org/10.1198/tast.2010.10052)), and in terms of spatial scale by Paciorek ([2010](https://doi.org/10.1214/10-STS326)).
+
+The fitted field is correlated with both covariates across the analysis cells (Spearman $\rho = -0.35$ with elevation and $+0.32$ with p95), and the two coefficients shifted by similar absolute amounts (−0.061 for p95, +0.039 for elevation). Because elevation's conditional coefficient was already close to zero, a shift of that size reversed its sign. Its posterior standard deviation also quadrupled (0.003 to 0.012) while that of p95 did not change, the variance inflation Hodges and Reich ([2010](https://doi.org/10.1198/tast.2010.10052)) describe for covariates aligned with the spatial effect.
+
+| Coefficient | Nonspatial (full) | Spatial (ICAR) |
+|---|---:|---:|
+| Canopy height, p95 | 0.724 [0.720, 0.729] | 0.663 [0.657, 0.669] |
+| Elevation | −0.022 [−0.027, −0.017] | 0.017 [−0.004, 0.042] |
+| Heat load | 0.036 [0.032, 0.040] | 0.014 [0.006, 0.022] |
+
+: Conditional coefficients under the full nonspatial model and the spatial ICAR model. Predictors are standardized within the analysis cells, so values are in rumple units per standard deviation. {#tbl-sensitivity}
+
+**Is the spatial field an artifact?** Because the field carries one latent value per cell, it can absorb coherent patterns of any origin, including acquisition and processing geometry. Four checks were run against the fitted field, using the 1 km tiles in which the LiDAR data were delivered; each null distribution came from the same tile grid shifted by whole 30 m cells to 500 random positions. Tile identity explained no more of the field's variance than the shifted grids did ($\eta^2 = 0.28$ against a null of $0.30 \pm 0.02$, $p = 0.67$). Neighboring cells straddling a tile seam showed no step, for the field and for raw rumple, p95 and canopy cover alike: their differences were no larger than across the shifted grids' seams. Rumple and p95 were instead smoother across real seams than expected (across-to-within ratios of 0.94 and 0.91 against a null of about 1.02, $p = 0.002$ for both, which survives correction for the 17 artifact tests recorded); the field itself was unaffected ($p = 0.22$), but the seams are evidently not neutral (see Discussion). Boundaries of the 600 m chunks used to build the canopy height model showed nothing. The field did not track per-tile pulse density, measured as first returns per m² from the LAS headers (Spearman $\rho = -0.28$, $p = 0.085$, $n = 38$ tiles). Delivered file size per km², a simple proxy for point density, did track the field ($\rho = 0.41$, $p = 0.011$), but it also tracked canopy structure itself ($\rho = 0.68$–$0.70$ with tile-mean p95, rumple and cover), because taller and denser canopies return more points per pulse. At the 1,200 m processing-chunk boundaries the field gave a ratio of 1.118 against a null of 1.022 ($p = 0.040$); this does not survive correction for the 17 tests, and it has no mechanism, since the products of that processing step are themselves flat at that scale.
+
+Part of the remaining spatial structure is measured canopy structure that was deliberately excluded from the model. The fitted field correlates $\rho = 0.44$ with canopy cover and $\rho = 0.44$ with canopy relief ratio, both computed in this study but omitted as covariates because they are strongly collinear with p95 and with each other.
+
+
+# Discussion
+
+Canopy surface complexity declined substantially with elevation across the study area, but the model sequence showed that this relationship was closely associated with concurrent changes in canopy height. Elevation alone had a strong negative relationship with rumple, whereas the elevation coefficient became small once p95 was included and its credible interval spanned zero once spatial structure was modeled as well. Canopy height, in contrast, remained strongly associated with rumple across every specification. The results therefore do not suggest that elevation is unimportant to forest structure. Rather, they show that the observed elevational pattern in rumple occurs alongside an elevational decline in canopy height, and that once that decline and the residual spatial structure are both accounted for, no independent elevation effect remains identifiable in these data.
+
+The strong relationship between p95 and rumple is also consistent with previous work linking canopy height and structural complexity. Kane et al. ([2010b](https://doi.org/10.1139/X10-064)) noted that rumple tends to increase with tree height in conifer forests, while Gough et al. ([2020](https://doi.org/10.1111/geb.13180)) and Atkins et al. ([2022](https://doi.org/10.1111/1365-2435.13983)) similarly found strong relationships between canopy height and measures of canopy complexity, although their measures describe the arrangement of vegetation within the canopy rather than its outer surface. Some association is expected geometrically because taller forests provide greater vertical space over which crown heights and canopy gaps can vary; Kane et al. ([2010b](https://doi.org/10.1139/X10-064)) state that the surface area of conifer crowns typically increases with tree height, causing rumple to increase as well. However, p95 and rumple represent distinct properties of the canopy. Here, p95 was calculated directly from the distribution of normalized first-return heights, whereas rumple was calculated from spatial gradients of a pit-free canopy height model. Their strong relationship should therefore be interpreted as an association between canopy height and canopy-surface complexity rather than as evidence that the two metrics are interchangeable.
+
+Topographic heat load explained comparatively little variation in rumple. Although heat load showed a positive marginal association, its coefficient was small after canopy height and elevation were included and remained small in the spatial model. Heat load summarizes potential solar exposure associated with slope, aspect, and latitude ([McCune and Keon 2002](https://doi.org/10.1111/j.1654-1103.2002.tb02087.x)), but it does not directly measure temperature, soil moisture, snow persistence, or productivity. The weak conditional relationship observed here therefore provides little evidence that topographic exposure, as represented by this index alone, accounts for substantial variation in canopy surface complexity across the study area.
+
+Canopy height and topography did not account for all of the spatial pattern in rumple. Residuals from the full nonspatial model remained positively autocorrelated, indicating that neighboring cells tended to have similar deviations from the values predicted by the measured covariates. Adding the spatial ICAR effect removed that structure, and it did so while moving the canopy-height coefficient by only about eight percent — but it reversed the sign of the elevation coefficient, and that contrast is itself informative. Elevation varies smoothly across the footprint at the same scale as the spatial field, so the two compete for the same variation; canopy height varies at much shorter range and is comparatively insensitive. A coefficient on a smooth covariate is therefore only as stable as the decision about how to model residual spatial structure, while a coefficient on a rough covariate is not (Hodges and Reich [2010](https://doi.org/10.1198/tast.2010.10052)). Approaches that restrict the spatial effect to the orthogonal complement of the covariates have been proposed to address this (Hodges and Reich [2010](https://doi.org/10.1198/tast.2010.10052)), though their properties remain debated ([Hanks et al. 2015](https://doi.org/10.1002/env.2331); [Khan and Calder 2022](https://doi.org/10.1080/01621459.2020.1788949)); no such restriction was applied here, and the elevation coefficient is reported as specification-dependent rather than resolved.
+
+Part of the remaining structure is measured but unmodeled canopy structure rather than unknown ecology: the fitted field correlates $\rho = 0.44$ with canopy cover and $\rho = 0.44$ with canopy relief ratio, both computed here but excluded as covariates because of their collinearity with p95. Beyond that, spatially organized factors not represented in the models could include differences in disturbance history, species composition, stand development, soils, snow persistence, or moisture availability, although these mechanisms were not measured directly in this study.
+
+Several limitations constrain interpretation of these results. Rumple and p95 were smoother across LiDAR tile seams than across arbitrary lines, although neither showed a step there and the spatial field was unaffected. Outlier filtering and height normalization were run tile by tile without a buffer, and edge effects from those steps are one plausible cause; the field showed no association with pulse density, but an influence of tile-edge processing on the canopy metrics cannot be excluded. Flight-line effects within tiles were not tested, since swath boundaries do not align with tile boundaries. Rumple measures the geometry of the outer canopy surface and does not capture all dimensions of forest structural complexity, such as understory layering, foliage-height diversity, or deadwood. Because p95 was computed over all first returns, including ground returns, part of its association with rumple in open cells may reflect canopy cover rather than height alone. The analysis also relied on a single LiDAR acquisition and study area and lacked independent field measurements against which the derived structural metrics could be validated. In addition, rumple is scale dependent, so the values and relationships reported here are specific to the 1 m canopy surface and 30 m analysis grain used in this study. Future work could test whether the observed height–rumple relationship persists across additional forest types and elevational gradients and could incorporate field measurements, species composition, climate, snowpack, or disturbance history to evaluate the ecological processes underlying the spatial patterns observed here.
+
+Overall, the analysis shows a strong decline in canopy surface complexity with elevation across the eastern Mount Rainier study area, but this marginal relationship is accounted for by a concurrent decline in canopy height. Canopy height was consistently the strongest measured correlate of rumple and the only coefficient whose sign and magnitude were stable across every specification; topographic heat load contributed relatively little; and substantial residual spatial structure remained after the measured covariates were considered. Explicitly accounting for that spatial dependence moved the canopy-height coefficient by only about eight percent, while the small remaining elevation coefficient changed sign and its interval came to include zero. That second change should not be read as an adjustment for unmeasured spatial factors (Hodges and Reich [2010](https://doi.org/10.1198/tast.2010.10052)): the evidence that canopy stature underlies the elevational pattern comes from the nonspatial sequence, and the spatial model shows how much a conclusion about a smooth topographic covariate can depend on the treatment of residual spatial structure.
+
+
+# References {.unnumbered}
+
+Abril-Pla, O., Andreani, V., Carroll, C., Dong, L., Fonnesbeck, C. J., Kochurov, M., Kumar, R., Lao, J., Luhmann, C. C., Martin, O. A., Osthege, M., Vieira, R., Wiecki, T., & Zinkov, R. (2023). PyMC: A modern, and comprehensive probabilistic programming framework in Python. *PeerJ Computer Science, 9*, e1516. [https://doi.org/10.7717/peerj-cs.1516](https://doi.org/10.7717/peerj-cs.1516)
+
+Ankori-Karlinsky, R., Hall, J., Murphy, L., Muscarella, R., Martinuzzi, S., Fahey, R., Zimmerman, J. K., & Uriarte, M. (2024). Chronic winds reduce tropical forest structural complexity regardless of climate, topography, or forest age. *Ecosystems, 27*, 479–491. [https://doi.org/10.1007/s10021-024-00900-5](https://doi.org/10.1007/s10021-024-00900-5)
+
+Atkins, J. W., Walter, J. A., Stovall, A. E. L., Fahey, R. T., & Gough, C. M. (2022). Power law scaling relationships link canopy structural complexity and height across forest types. *Functional Ecology, 36*, 713–726. [https://doi.org/10.1111/1365-2435.13983](https://doi.org/10.1111/1365-2435.13983)
+
+Banerjee, S., Carlin, B. P., & Gelfand, A. E. (2015). *Hierarchical Modeling and Analysis for Spatial Data* (2nd ed.). CRC Press.
+
+Capretto, T., Piho, C., Kumar, R., Westfall, J., Yarkoni, T., & Martin, O. A. (2022). Bambi: A simple interface for fitting Bayesian linear models in Python. *Journal of Statistical Software, 103*(15), 1–29. [https://doi.org/10.18637/jss.v103.i15](https://doi.org/10.18637/jss.v103.i15)
+
+Gough, C. M., Atkins, J. W., Fahey, R. T., Hardiman, B. S., & LaRue, E. A. (2020). Community and structural constraints on the complexity of eastern North American forests. *Global Ecology and Biogeography, 29*, 2107–2118. [https://doi.org/10.1111/geb.13180](https://doi.org/10.1111/geb.13180)
+
+Hanks, E. M., Schliep, E. M., Hooten, M. B., & Hoeting, J. A. (2015). Restricted spatial regression in practice: Geostatistical models, confounding, and robustness under model misspecification. *Environmetrics, 26*, 243–254. [https://doi.org/10.1002/env.2331](https://doi.org/10.1002/env.2331)
+
+Hodges, J. S., & Reich, B. J. (2010). Adding spatially-correlated errors can mess up the fixed effect you love. *The American Statistician, 64*, 325–334. [https://doi.org/10.1198/tast.2010.10052](https://doi.org/10.1198/tast.2010.10052)
+
+Jenness, J. S. (2004). Calculating landscape surface area from digital elevation models. *Wildlife Society Bulletin, 32*, 829–839. [https://doi.org/10.2193/0091-7648(2004)032%5B0829:CLSAFD%5D2.0.CO;2](https://doi.org/10.2193/0091-7648(2004)032%5B0829:CLSAFD%5D2.0.CO;2)
+
+Kane, V. R., McGaughey, R. J., Bakker, J. D., Gersonde, R. F., Lutz, J. A., & Franklin, J. F. (2010a). Comparisons between field- and LiDAR-based measures of stand structural complexity. *Canadian Journal of Forest Research, 40*, 761–773. [https://doi.org/10.1139/X10-024](https://doi.org/10.1139/X10-024)
+
+Kane, V. R., Bakker, J. D., McGaughey, R. J., Lutz, J. A., Gersonde, R. F., & Franklin, J. F. (2010b). Examining conifer canopy structural complexity across forest ages and elevations with LiDAR data. *Canadian Journal of Forest Research, 40*, 774–787. [https://doi.org/10.1139/X10-064](https://doi.org/10.1139/X10-064)
+
+Kane, V. R., Lutz, J. A., Cansler, C. A., Povak, N. A., Churchill, D. J., Smith, D. F., Kane, J. T., & North, M. P. (2015). Water balance and topography predict fire and forest structure patterns. *Forest Ecology and Management, 338*, 1–13. [https://doi.org/10.1016/j.foreco.2014.10.038](https://doi.org/10.1016/j.foreco.2014.10.038)
+
+Khan, K., & Calder, C. A. (2022). Restricted spatial regression methods: Implications for inference. *Journal of the American Statistical Association, 117*, 482–494. [https://doi.org/10.1080/01621459.2020.1788949](https://doi.org/10.1080/01621459.2020.1788949)
+
+Khosravipour, A., Skidmore, A. K., Isenburg, M., Wang, T., & Hussin, Y. A. (2014). Generating pit-free canopy height models from airborne lidar. *Photogrammetric Engineering & Remote Sensing, 80*, 863–872. [https://doi.org/10.14358/PERS.80.9.863](https://doi.org/10.14358/PERS.80.9.863)
+
+Korhonen, L., Korpela, I., Heiskanen, J., & Maltamo, M. (2011). Airborne discrete-return LIDAR data in the estimation of vertical canopy cover, angular canopy closure and leaf area index. *Remote Sensing of Environment, 115*, 1065–1080. [https://doi.org/10.1016/j.rse.2010.12.011](https://doi.org/10.1016/j.rse.2010.12.011)
+
+Kumar, R., Carroll, C., Hartikainen, A., & Martin, O. (2019). ArviZ a unified library for exploratory analysis of Bayesian models in Python. *Journal of Open Source Software, 4*(33), 1143. [https://doi.org/10.21105/joss.01143](https://doi.org/10.21105/joss.01143)
+
+Mälicke, M. (2022). SciKit-GStat 1.0: A SciPy-flavored geostatistical variogram estimation toolbox written in Python. *Geoscientific Model Development, 15*, 2505–2532. [https://doi.org/10.5194/gmd-15-2505-2022](https://doi.org/10.5194/gmd-15-2505-2022)
+
+Matheron, G. (1963). Principles of geostatistics. *Economic Geology, 58*, 1246–1266. [https://doi.org/10.2113/gsecongeo.58.8.1246](https://doi.org/10.2113/gsecongeo.58.8.1246)
+
+McCune, B., & Keon, D. (2002). Equations for potential annual direct incident radiation and heat load. *Journal of Vegetation Science, 13*, 603–606. [https://doi.org/10.1111/j.1654-1103.2002.tb02087.x](https://doi.org/10.1111/j.1654-1103.2002.tb02087.x)
+
+Moran, P. A. P. (1950). Notes on continuous stochastic phenomena. *Biometrika, 37*, 17–23. [https://doi.org/10.1093/biomet/37.1-2.17](https://doi.org/10.1093/biomet/37.1-2.17)
+
+Morris, M., Wheeler-Martin, K., Simpson, D., Mooney, S. J., Gelman, A., & DiMaggio, C. (2019). Bayesian hierarchical spatial models: Implementing the Besag York Mollié model in Stan. *Spatial and Spatio-temporal Epidemiology, 31*, 100301. [https://doi.org/10.1016/j.sste.2019.100301](https://doi.org/10.1016/j.sste.2019.100301)
+
+Paciorek, C. J. (2010). The importance of scale for spatial-confounding bias and precision of spatial regression estimators. *Statistical Science, 25*, 107–125. [https://doi.org/10.1214/10-STS326](https://doi.org/10.1214/10-STS326)
+
+Parker, G. G., Harmon, M. E., Lefsky, M. A., Chen, J., Van Pelt, R., Weis, S. B., Thomas, S. C., Winner, W. E., Shaw, D. C., & Franklin, J. F. (2004). Three-dimensional structure of an old-growth *Pseudotsuga-Tsuga* canopy and its implications for radiation balance, microclimate, and gas exchange. *Ecosystems, 7*, 440–453. [https://doi.org/10.1007/s10021-004-0136-5](https://doi.org/10.1007/s10021-004-0136-5)
+
+PDAL contributors. (2026). *PDAL: The Point Data Abstraction Library* [Computer software]. [https://doi.org/10.5281/zenodo.10884408](https://doi.org/10.5281/zenodo.10884408)
+
+Rey, S. J., & Anselin, L. (2007). PySAL: A Python library of spatial analytical methods. *The Review of Regional Studies, 37*, 5–27. [https://doi.org/10.52324/001c.8285](https://doi.org/10.52324/001c.8285)
+
+Seyboldt, A., Carlson, E. L., & Carpenter, B. (2026). Preconditioning Hamiltonian Monte Carlo by minimizing Fisher divergence. *arXiv*, 2603.18845. [https://doi.org/10.48550/arXiv.2603.18845](https://doi.org/10.48550/arXiv.2603.18845)
+
+U.S. Geological Survey. (2022). *WA Eastern Cascades 2019 B19 project report*. [Project report](https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/metadata/WA_EasternCascades_2019_B19/USGS_WA_EasternCascades_2019_B19_Project_Report.pdf)
+
+Ver Hoef, J. M., Peterson, E. E., Hooten, M. B., Hanks, E. M., & Fortin, M.-J. (2018). Spatial autoregressive models for statistical inference from ecological data. *Ecological Monographs, 88*, 36–59. [https://doi.org/10.1002/ecm.1283](https://doi.org/10.1002/ecm.1283)
+
+Walter, J. A., Stovall, A. E. L., & Atkins, J. W. (2021). Vegetation structural complexity and biodiversity in the Great Smoky Mountains. *Ecosphere, 12*(3), e03390. [https://doi.org/10.1002/ecs2.3390](https://doi.org/10.1002/ecs2.3390)
