@@ -1,0 +1,59 @@
+# Conda environment for the Rainier canopy-structure spatial analysis.
+# Build:   conda env create -f environment.yml
+# Use:     conda activate rainier-canopy
+# After building, lock exact versions with:
+#          conda env export --no-builds > environment.yml
+#
+# NOTE: the `libblas=*=*openblas` pin forces OpenBLAS and keeps Intel MKL
+# (and its OpenMP runtime) OUT of the env. Mixing MKL's OpenMP with nutpie's
+# LLVM OpenMP is what caused the hard native crash (exit -1073740791); a single
+# OpenMP runtime avoids it. Do not add MKL-built packages (e.g. mkl-built
+# PyTorch) to this env -- keep those in a separate environment.
+
+name: rainier-canopy
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - libblas=*=*openblas        # force OpenBLAS -> single OpenMP runtime (see note above)
+
+  # --- core scientific stack ---
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+
+  # --- Bayesian modeling ---
+  - pymc                       # brings pytensor
+  - nutpie>=0.16.9             # fast NUTS sampler; >=0.16.9 for adaptation="low_rank" (08_icar.py)
+  - bambi                      # non-spatial regression sequence (rumple ~ predictors)
+  - arviz=0.23.*               # PINNED: arviz 1.0 removed the top-level InferenceData/concat
+                               # API that this PyMC imports -> unpinned pulls a broken combo.
+                               # 0.23.x is the last series compatible with the scripts here.
+
+  # --- geospatial + spatial statistics ---
+  - rasterio
+  - geopandas
+  - shapely
+  - libpysal                   # spatial weights / neighbour graph
+  - esda                       # Moran's I
+  - scikit-gstat               # semivariograms (import name: skgstat)
+  - contextily                 # study-area basemap (optional; the .qmd guards it)
+
+  # --- LiDAR preprocessing (only needed to rebuild from the raw LAZ tiles; laspy is
+  #     also used by 11 to build its tile-header cache on first run) ---
+  - python-pdal
+  - laspy
+
+  # --- write-up rendering ---
+  - jupyter                    # Quarto's Python execution engine
+  - quarto                     # the Quarto CLI itself (renders the .qmd)
+
+  # LAZ decompression backend for laspy. Self-contained Rust wheel -- no BLAS/
+  # OpenMP -- so it cannot reintroduce the runtime conflict. Only needed if you
+  # read compressed .laz files during preprocessing.
+  - pip
+  - pip:
+      - lazrs
